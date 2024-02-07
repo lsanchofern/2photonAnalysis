@@ -1,0 +1,22 @@
+function [ODscore] = getODscore_spk(spks,spk_resp)
+%ODI = (C-I)/(C+I);  
+%normalize to min, max first 
+
+    
+for i=1: length(spks.cells) %for each cell at max ori response 
+    %normalize to min, max
+    if spk_resp=
+       all_contrapeaks(i)=max(spks.cells(i).contra.oriresps); 
+       all_ipsipeaks(i)=max(spks.cells(i).ipsi.oriresps); 
+    end 
+end
+
+for i=1:length(spks.cells)
+    %normalize
+    contra_norm(i)=(all_contrapeaks(i)-min(all_contrapeaks,'omitnan'))/(max(all_contrapeaks,'omitnan')-min(all_contrapeaks,'omitnan')); 
+    ipsi_norm(i)=(all_ipsipeaks(i)-min(all_ipsipeaks,'omitnan'))/(max(all_ipsipeaks,'omitnan')-min(all_ipsipeaks,'omitnan')); 
+end
+
+%get OD score 
+ODscore=(contra_norm-ipsi_norm)./(contra_norm+ipsi_norm);
+end

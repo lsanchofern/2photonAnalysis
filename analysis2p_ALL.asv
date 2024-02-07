@@ -1,0 +1,1007 @@
+%calculate the response properties of every cell 
+
+%requires the following files:
+   % 1. Scanbox .mat file that contains the TTL pulse frame numbers for
+   % stim on/off
+   % 2. Suite2p folder that contains fluorescence traces for each ROI and
+   % deconvolved spiking
+   % 3. CSV file contain specific sequence of stimuli and their parameters,
+   % ori, sf, and sp-> this file is exported by Psychopy upon completion of
+   % expeimrent
+
+%which indicator
+indicator='f'; %gCamp6f 
+
+%baseline frame window
+bsF= 2; %number of frames for baseline 
+
+%if 1, then this is a retinotopy experiment 
+analyze_retinotopy=1; 
+
+%if 1, then this is a drifting gratings experiment
+analyze_drift=0; 
+
+%if 1, then this is a flashing gratings experiment 
+analyze_flash=0; 
+
+%if 1, then both eye imaging files are concatenated
+binocular_exp=0; 
+
+%so it goes eye1, drifting then flashing and then eye2, drifting then
+%flashing
+
+%make sure contralateral eye file is first 
+
+%% load the data 
+
+animal = input('Please enter animal ID:', 's'); %ask user for the animal ID
+day= input ('Please enter day of recording:','s'); %ask user for day e.g. "D1"
+fov= input('Please enter fov:','s'); %user for fov eg. "000"
+exp=input ('Please enter exp:','s'); %ask user for exp eg. "001" 
+
+%set SaveDir 
+global SaveDir
+
+SaveDir = ['Z:\AnalyzedData\calcium','\', anim, '\', expnum, '\'];
+
+    if exist(SaveDir,'dir') == 0;
+            mkdir(SaveDir)
+    end
+
+
+
+contra_end=12345; %change this depending on what the last frame of the first eye file is 
+
+%load the sbx .mat file with the stimulus frame on/off index
+if analyze_retinotopy==1 
+    [stim_info] = loadsbxmat(animal,day,fov, exp); 
+elseif analyze_drift==1 && binocular_exp==0
+    [stim_info] = loadsbxmat(animal,day,fov, exp); 
+elseif analyze_drift==1 && binocular_exp==1
+    [stim_info_contra, stim_info_ipsi]= loadsbxmat (animal, day, fov, exp, 1)
+end
+
+
+%load the suite2p data 
+[Fall] = loadsuite2p(animal,day,fov, exp); 
+
+
+
+%load the stimulus information, loaded as a table  
+if analyze_retinotopy==1
+    [stim_table] = loadstimid(animal,day,fov, exp); %for retinotopy experiment 
+else
+    [stim_table_contra]= loadstimid(animal,day,fov, exp, 'contra'); %for contralateral eye  
+    [stim_table_ipsi]= loadstimid(animal,day,fov, exp, 'ipsi'); %for ipsilateral eye
+end
+
+
+%% load sbx parameters
+
+if isfield (info, 'recordsPerBuffer_bi') %bidirectional scanning or not 
+    scanmode=2; 
+else
+    scanmode=1; %if not, then unidirectional (~15 frames/ s) 
+end
+
+%get stim on/off indices 
+
+if analyze_retinotopy==1
+    [stim_frame] = trialinfo(info); %for retinotopy experiment 
+else
+    [stim_frame_contra, stim_frame_ipsi]= trialinfo(info)
+    [stim_table_contra]= loadstimid(animal,day,fov, exp, 'contra'); %for contralateral eye  
+    [stim_table_ipsi]= loadstimid(animal,day,fov, exp, 'ipsi'); %for ipsilateral eye
+end
+
+
+%% extract data from suite2p Fall .mat file 
+
+%neuropil correction factor 
+corr_factor=.7; %according to suite2p documentation, we can start with this
+
+%get the indices of cells, don't do this analysis for non-cell ROIs 
+iscellind= find (iscell(:,1)==1); %indices of cells 
+
+for i=1:length(iscellind)
+    if max(F(i,:))-min(F(i,:))==0
+        iscellind(i)=0; %remove any traces that are zero
+    end
+end 
+iscellind(iscellind==0)=[]; 
+
+numCells=length(iscellind); % count all 'iscell'= total ROIs that are cells
+cells.total.GCaMP=numCells; %make structure with cell information 
+
+%neuropil correction of F
+F_corr_cells= F(iscellind,:)-(corr_factor*Fneu(iscellind,:)); %extract info only for cells 
+
+%normalize fluorescences (you don't want negative fluorescence), make min 0
+F_corr_cells=F_corr_cells-min(F_corr_cells, [], 2); 
+
+Fneu_cell=Fneu(iscellind,:); %neuropil for cells 
+F_cell=F(iscellind,:); %F raw for cells 
+
+%now we must split F and Fneu, and spks into contralateral and ipsilateral
+%if a binocular experiment
+ 
+if binocular_exp==1 
+    F_contra= F_cells(:,1:contra_end); %raw F for cells 
+    Fneu_contra=Fneu_cell(:,1:contra_end); %raw neuropil for cells  
+    F_corr_cells_contra= F_corr_cells(:,1:contra_end)%neuropil correct F for cells 
+    spks_contra=spks(:,1:contra_end); %spikes for 
+
+    F_ipsi=F_cells (:, contra_end+1:end); %raw F for cells 
+    Fneu_ipsi=Fneu(:, contra_end+1:end);%raw neuropil for cells  
+    F_corr_cells_ipsi=F_corr_cells_ipsi(:, contra_end+1:end); % neuropil corrected 
+    spks_ipsi=spks(:, contra_end+1:end);
+end 
+
+
+%% get unique trial   information
+
+%depends on type of experiment, if retinotopy experiment then the others
+%are set to 0
+
+if analyze_retinotopy==1
+    [unique_trial,checkermat] = uniquetrial_retinotopy(stim_table);
+    unique_trialnum= size (unique_trial,1); %number of unique  trial conditions
+    unique_azimuth= unique (unique_trial(:,1)); % unique azimuth
+    unique_altitude= unique (unique_trial(:,2)); % unique altitude 
+
+end
+
+numstd=3; %thresholding for response amplitude
+ca_delay=7; %calcium indicator delay in frames 
+
+%% get dF/F for retinotopy
+
+%if retinotopic experiment 
+if analyze_retinotopy==1
+    [dFoF_on_peak,dFoF_on, dFoF_off, bs, alldFoF] = dFoF_retinotopy(stim_frame,F_corr_cells, ca_delay);
+%use stim_frame to index into fluo trace 
+end
+
+%indices for trials will also become indices for df/f trace since we used
+%trial onset to make this file 
+
+if analyze_retinotopy==1
+for j=1:unique_trialnum % for every unique trial , one field in index 
+    ind(:,j)= ismember(checkermat, unique_trial (j,:), 'rows'); % where is jth unique trial in the whole trial sequence? 
+    indices(j).trial_rep= find(ind(:,j)==1); % index of where j trial is in entire trial sequence 
+    indices(j).pos= checkermat(j,:); 
+
+    %now organize for azimuth 
+    for l= 1:length(unique_azimuth)
+        indices(l).azimuthloc= find (checkermat(:,1)==unique_azimuth(l)); %index to find this trial in  
+        indices(l).azimuth=unique_azimuth(l); %what is the actual orientation value
+    end 
+    % now organize for altitude
+    for m= 1:length(unique_altitude)
+        indices(m).altitudeloc= find (checkermat(:,2)==unique_altitude(m)); %index to find this trial in  
+        indices(m).altitude=unique_altitude(m); %what is the actual sf value
+    end 
+
+    % now index into dfoF file to make a new structure for each cell ROI  
+    for k=1: numCells %for every cell, per each unique trial (a row in dfof trace)
+        dFoF.conds(j).cells(k).trial_num=indices(j).trial_rep; %unique trial ID 
+        dFoF.conds(j).cells(k).peak=dFoF_on_peak(k, indices(j).trial_rep); 
+        dFoF.conds(j).cells(k).mean_peak=mean(dFoF_on_peak(k, indices(j).trial_rep));
+        dFoF.conds(j).cells(k).var=var(dFoF_on(k, indices(j).trial_rep), 0); 
+        dFoF.conds(j).cells(k).traces=dFoF_on(k, indices(j).trial_rep); 
+        dFoF.conds(j).cells(k).avg_trace=mean(dFoF_on(k, indices(j).trial_rep),2);
+        dFoF.conds(j).cells(k).std_trace=std(dFoF_on(k, indices(j).trial_rep));
+
+        dFoF.conds(j).cells(k).off_mean=mean(dFoF_off(k, indices(j).trial_rep)); 
+        dFoF.conds(j).cells(k).off_traces=dFoF_off(k, indices(j).trial_rep);
+        dFoF.conds(j).cells(k).off_std=std(dFoF_off(k, indices(j).trial_rep)); 
+    %   dFoF_conds(j).cells(k).std_trace=std(abs(dFoF_during(k, indices(j).drift_trial_rep),2));
+    end 
+end
+end
+
+%% organize condition for test of visually responsivity for retinotopy 
+
+if analyze_retinotopy==1  
+for i=1:numCells
+    median_dFoF(i)=median(alldFoF(i,:),'all');     
+end 
+
+for i=1:numCells
+    indices(i).std = find(alldFoF(i,:)<0); 
+    std_lowerdFoF(i)= std(alldFoF(i,indices(i).std));
+end
+
+threshold_active=std_lowerdFoF_drift_contra*3.72; 
+
+for qq=1:unique_trialnum
+    for kk=1:numCells
+        stimconds(qq, 1:(length(dFoF.conds(qq).cells(kk).peak)), kk)= cat(1,dFoF.conds(qq).cells(kk).peak); %each slice is a cell, each row a unique trial and column a rep of that trial  
+        stimconds_trials(qq,1:(length(dFoF.conds(qq).cells(kk).trial_num)), kk)= cat(1,dFoF.conds(qq).cells(kk).trial_num); 
+        stimconds_off(qq, 1:(length(dFoF.conds(qq).cells(kk).off_traces)), kk)= cat(1,dFoF.conds(qq).cells(kk).off_traces); %each slice is a cell, each row a unique trial and column a rep of that trial         
+    end
+end
+
+%stimconds matrix will be 45(unique trials)x 8(reps)x n(cells) 
+
+stimconds(stimconds==0)=nan;
+stimconds= permute(stimconds, [2 1 3]);% make column-wise so reps are in the same column
+
+stimconds_off(stimconds_off==0)=nan;
+stimconds_off= permute(stimconds_off, [2 1 3]);% make column-wise so reps are in the same column
+
+stimconds_off(stimconds_off==0)=nan;
+stimconds_off= permute(stimconds_off, [2 1 3]);
+%make reps x unique trial x cells number 
+
+%Calculate reliability metrics: 
+for j=1:unique_trialnum
+    for q=1:numCells
+        response_CV(j,q)= std(stimconds(:,j,q)) ./ mean(stimconds(:,j,q)); %response reliability metric for each stimulus condition 
+    end
+end
+
+%% significant visual response? 
+
+%test stim on vs. threshold 
+%check to see if visual response crosses threshold 
+visresp_cells=zeros(unique_trialnum, numCells); 
+for q=1:numCells
+    for j=1:unique_trialnum % done across reps and stim on vs. stim off        
+        if length(find(stimconds(:,j,q)>= threshold_active(q)))>1 
+            visresp_cells(j,q)=1; %matrix of vis resp cells, 0/1
+        end
+    end
+end
+
+%check to see in how many cells there is a threshold cross 
+visresp_cells_total=zeros(1,numCells); 
+for q=1:numCells
+    if length(find(visresp_cells(:,q)==1))>=1
+        visresp_cells_total(q)=1; 
+    end
+end
+
+
+%% plot percent visually responsive 
+
+num_visresp=length(find(visresp_cells_total==1));
+percent_visresp=num_visresp/numCells; 
+
+plotresponsivecells(num_visresp,numCells,SaveDir); 
+
+%% put data in a structure 
+
+allcells.response_CV= response_CV; %store response CV 
+allcells.uniquetrials= unique_trial; %store unique trials 
+for n=1:unique_trialnum
+    allcells(n).uniquetrials_ID(n)=indices(n).trial_rep; 
+end%store unique trials indices
+
+allcells.uniqueazimuth= unique_azimuth; %store unique azimuth
+allcells.uniquealititude=unique_altitude; %store unique altitude 
+
+for n=1:unique_azimuth
+    allcells(n).uniqueazimuth_ID=indices(n).azimuthloc; %store indices 
+end
+for n=1:unique_altitude
+    allcells(n).uniquealtitude_ID=indices(n).altitudeloc; %store indices 
+end
+
+
+%save structures in Retinotopy folder for animal 
+
+
+
+%% plotting retinotopy for all cells that had responses for a particular trial 
+%if a responsive cell, then look at retinotopy  
+%order by azimuth 
+%use indices(x).azimuthloc and indices(x).azimuth to index into dFoF.conds(index) file for
+%each cell, then order by altitude 
+
+%find unique azimuth and altitude trials 
+for kk=1:numCells
+        for j=1:length(unique_azimuth)
+            dFoF.azimuth(j).cells(kk).peak= dFoF_on_peak(kk, indices(j).azimuthloc);
+        end
+        for j=1:length(unique_altitude)
+            dFoF.altitude(j).cells(kk).peak= dFoF_on_peak(kk, indices(j).altitudeloc);
+        end
+end
+
+%organize by azimuth 
+for qq=1:length(unique_azimuth)
+    for kk=1:numCells
+        resp_azimuth(qq, 1:(length(dFoF.azimuth(qq).cells(kk).peak)), kk)= cat(1,dFoF.azimuth(qq).cells(kk).peak); %each slice is a cell, each row a unique trial and column a rep of that trial  
+    end
+end
+
+%organize by altitude 
+for qq=1:length(unique_altitude)
+    for kk=1:numCells
+        resp_altitude(qq, 1:(length(dFoF.altitude(qq).cells(kk).peak)), kk)= cat(1,dFoF.altitude(qq).cells(kk).peak); %each slice is a cell, each row a unique trial and column a rep of that trial  
+    end
+end
+
+%rearrange so that reps are in a column, each slice is a cell, and each
+%trial is a row 
+resp_azimuth(resp_azimuth==0)=nan;
+resp_azimuth= permute(resp_azimuth, [2 1 3]);
+
+azimuth_trialnum=length(dFoF.azimuth(1).cells(1).peak); 
+azimuth_respcells=zeros(azimuth_trialnum, length(unique_azimuth), num_visresp); 
+
+resp_altitude(resp_altitude==0)=nan;
+resp_altitude= permute(resp_altitude, [2 1 3]);
+
+altitude_trialnum=length(dFoF.altitude(1).cells(1).peak); 
+altitude_respcells=zeros(altitude_trialnum, length(unique_altitude), num_visresp); 
+
+
+%select only responsive cells 
+%indices 
+indices(1).respcells = find(visresp_cells_total==1);
+
+for i=1:num_visresp
+    azimuth_respcells(:,:,i)= resp_azimuth(:,:,indices(1).respcells(i));
+    altitude_respcells(:,:,i)= resp_altitude(:,:,indices(1).respcells(i));
+end
+
+%% test for retinotopy 
+
+%peak responses as a measure of position- azimuth/ altitude 
+%average by azimuth, trials 
+avg_azimuth_responses= zeros(length(unique_azimuth),num_visresp);
+for i=1:num_visresp
+    for j=1:length(unique_azimuth)
+        avg_azimuth_responses(j,i)= mean(azimuth_respcells(:,j,i)); 
+    end 
+end
+
+%what are the peak responses 
+for i=1:num_visresp
+    [peak_azimuth_responses(i),indices(i).azimuth_peak]=max(avg_azimuth_responses(:,i)); 
+
+end
+for i=1:num_visresp
+    azimuth_peak(i)=unique_azimuth(indices(i).azimuth_peak); 
+end 
+
+%average by altitude, trials 
+avg_altitude_responses= zeros(length(unique_altitude),num_visresp);
+for i=1:num_visresp
+    for j=1:length(unique_altitude)
+        avg_altitude_responses(j,i)= mean(altitude_respcells(:,j,i)); 
+    end 
+end
+
+%what was the peak response and which was it? 
+for i=1:num_visresp
+    [peak_altitude_responses(i),indices(i).altitude_peak]=max(avg_altitude_responses(:,i)); 
+end
+for i=1:num_visresp
+    altitude_peak(i)=unique_altitude(indices(i).altitude_peak); 
+end
+
+%convert to degrees
+azimuth_peak_degrees=azimuth_peak*(112/40);
+altitude_peak_degrees=altitude_peak*(81/40);
+
+%% store data in a structure for significant cells 
+
+SigCells.ID=  indices(1).respcells; %save IDs of significant cells
+
+for i=1:num_visresp 
+    SigCells(i).azimuth=unique_azimuth; 
+    SigCells(i).azimuthResponses=avg_azimuth_responses(:,i); 
+    SigCells(i).azimuth_ID=indices(i).azimuthloc; 
+    SigCells(i).Azimuthpref=azimuth_peak_degrees; 
+    SigCells(i).altitude=unique_altitude; 
+    SigCells(i).altitudeResponses=avg_altitude_responses(:,i); 
+    SigCells(i).altitude_ID=indices(i).altitudeloc; 
+    SigCells(i).Altitudepref=altitude_peak_degrees;
+end
+
+%save it 
+
+
+%% get cell ROI positions for retinotopy 
+
+
+for n=1:numCells %get location info for each cell ROI
+	cell_stat{1,n}.xpix=stat{1,iscellind(n)}.xpix; %xpixels
+    cell_stat{1,n}.ypix=stat{1,iscellind(n)}.ypix; %ypixels
+    cell_stat{1,n}.xcirc=stat{1,iscellind(n)}.xcirc; %neuropil mask xpix
+    cell_stat{1,n}.ycirc=stat{1,iscellind(n)}.ycirc; %neuropil mask ypix
+end
+
+%% Preferred retinotopy 
+
+%color code cells according to preferred retinotopy and plot them on the
+%image of the cells 
+plot_im_retinotopy(ops, cell_stat, numCells, indices,unique_azimuth, azimuth_peak_degrees,SaveDir); 
+
+%make histograms for preferred position
+
+f3=figure ('Name', 'Distribution of Responses', 'NumberTitle', 'off'); 
+tiledlayout(1,2); 
+
+nexttile
+histogram(azimuth_peak_degrees,'NumBins',10); 
+
+nexttile
+histogram(altitude_peak_degrees,'NumBins',10); 
+
+end 
+
+%% end of retinotopy experiment 
+
+%% if drifting and flashing gratings experiment 
+
+%if drifting and flashing gratings experiment  
+if (analyze_drift ==1) && (analyze_flash==1) %this should be the same for both eyes 
+    %DRIFTING, for contralateral eye 
+    [unique_trial_drift_contra,stimulus_drift_contra] = uniquetrial_drifting(stim_table_contra);
+     unique_trialnum_drift_contra= size (unique_trial_drift_contra,1); %number of unique  trial conditions
+     unique_sf_drift_contra= unique (unique_trial_drift_contra(:,1)); % unique spatial freq, sorted
+     unique_ori_drift_contra= unique (unique_trial_drift_contra(:,2)); %unique orientation , sorted
+    %DRIFTING, for ipsilateral eye 
+    [unique_trial_drift_ipsi,stimulus_drift_contra] = uniquetrial_drifting(stim_table_ipsi);
+     unique_trialnum_drift_ipsi= size (unique_trial_drift_ipsi,1); %number of unique  trial conditions
+     unique_sf_drift_ipsi= unique (unique_trial_drift_ipsi(:,1)); % unique spatial freq, sorted
+     unique_ori_drift_ipsi= unique (unique_trial_drift_ipsi(:,2)); %unique orientation , sorted
+    
+     %FLASHING, for contralateral eye
+     [unique_trial_flash_contra,stimulus_flash_contra] = uniquetrial_flashing(stim_table_contra);
+     unique_trialnum_flash_contra= size (unique_trial_flash,1); %number of unique  trial conditions
+     unique_sf_flash_contra= unique (unique_trial_flash(:,1)); %unique spatial freq, sorted
+     unique_ori_flash_contra= unique (unique_trial_flash(:,2)); %unique orientation, sorted
+     unique_sp_flash_contra= unique (unique_trial_flash(:,3)); %unique spatial phase , sorted
+     %FLASHING, for ipsilateral eye 
+     [unique_trial_flash_ipsi,stimulus_flash_ipsi] = uniquetrial_flashing(stim_table_ipsi);
+     unique_trialnum_flash_ipsi= size (unique_trial_flash_ipsi,1); %number of unique  trial conditions
+     unique_sf_flash_ipsi= unique (unique_trial_flash_ipsi(:,1)); %unique spatial freq, sorted
+     unique_ori_flash_ipsi= unique (unique_trial_flash_ipsi(:,2)); %unique orientation, sorted
+     unique_sp_flash_ipsi= unique (unique_trial_flash_ipsi(:,3)); %unique spatial phase , sorted
+end
+
+%% get dFoF for each eye for drifting gratings, if binocular experiment  
+
+if binocular_exp==1
+    %for contralateral eye 
+[dFoF_on_peak_drift_contra,dFoF_on_drift_contra, dFoF_off_drift_contra, bs_drift_contra, alldFoF_drift_contra] = dFoF_drifting(...
+    stim_frame_contra,F_corr_cells_contra, ca_delay);
+
+    %for ipsilateral eye 
+[dFoF_on_peak_drift_ipsi,dFoF_on_drift_ipsi, dFoF_off_drift_ipsi, bs_drift_ipsi, alldFoF_drift_ipsi] = dFoF_drifting(...
+    stim_frame_ipsi,F_corr_cells_ipsi, ca_delay);
+
+%for drifting gratings, CONTRALATERAL  
+    for j=1:unique_trialnum_drift_contra % for every unique trial , one field in index 
+      ind_drift_contra(:,j)= ismember(stimulus_drift_contra, unique_trial_drift_contra (j,:), 'rows'); % where is jth unique trial in the whole trial sequence? 
+      indices.drift(j).contra.trial_rep= find(ind_drift_contra(:,j)==1); % index of where j trial is in entire trial sequence 
+      indices.drift(j).contra.pos= stimulus_drift_contra(j,:); 
+
+    %now organize for sf 
+     for l= 1:length(unique_sf_drift_ipsi)
+            indices.drift(l).contra.sfloc= find (stimulus_drift_contra(:,1)==unique_sf_drift_contra(l)); %index to find this trial in  
+            indices.drift(l).contra.sf=unique_sf_drift_contra(l); %what is the actual spatial frequency value
+        end 
+    % now organize for ori
+        for m= 1:length(unique_ori_drift_ipsi)
+            indices.drift(m).contra.oriloc= find (stimulus_drift_contra(:,2)==unique_ori_drift_contra(m)); %index to find this trial in  
+            indices.drift(m).contra.ori=unique_ori_drift_contra(m); %what is the actual orientation value
+        end 
+
+    % now index into dfoF file to make a new structure for each cell ROI  
+        for k=1: numCells %for every cell, per each unique trial (a row in dfof trace)
+            dFoF.drift.contra.conds(j).cells(k).trial_num=indices.drift(j).contra.trial_rep; %unique trial ID 
+            dFoF.drift.contra.conds(j).cells(k).peak=dFoF_on_peak_drift_contra(k, indices.drift(j).contra.trial_rep); 
+            dFoF.drift.contra.conds(j).cells(k).mean_peak=mean(dFoF_on_peak_drift_contra(k, indices.drift(j).contra.trial_rep));
+            dFoF.drift.contra.conds(j).cells(k).var=var(dFoF_on_drift_contra(k, indices.drift(j).contra.trial_rep), 0); 
+            dFoF.drift.contra.conds(j).cells(k).traces=dFoF_on_drift_contra(k, indices.drift(j).contra.trial_rep); 
+            dFoF.drift.contra.conds(j).cells(k).avg_trace=mean(dFoF_on_drift_contra(k, indices.drift(j).contra.trial_rep),2);
+            dFoF.drift.contra.conds(j).cells(k).std_trace=std(dFoF_on_drift_contra(k, indices.drift(j).contra.trial_rep));
+            
+            dFoF.drift.contra.conds(j).cells(k).off_mean=mean(dFoF_off_drift_contra(k, indices.drift(j).contra.trial_rep)); 
+            dFoF.drift.contra.conds(j).cells(k).off_traces=dFoF_off_drift_contra(k, indices.drift(j).contra.trial_rep);
+            dFoF.drift.contra.conds(j).cells(k).off_std=std(dFoF_off_drift_contra(k, indices.drift(j).contra.trial_rep)); 
+            dFoF.drift.contra.conds(j).cells(k).trace=alldFoF_drift_contra(k,indices.drift(j).contra.trial_rep); %whole trace 
+    %   dFoF_conds(j).cells(k).std_trace=std(abs(dFoF_during(k, indices(j).drift_trial_rep),2));
+        end 
+    end
+
+
+%for drifting gratings, IPSILATERAL   
+    for j=1:unique_trialnum_drift_ipsi % for every unique trial , one field in index 
+      ind_drift_ipsi(:,j)= ismember(stimulus_drift_ipsi, unique_trial_drift_ipsi (j,:), 'rows'); % where is jth unique trial in the whole trial sequence? 
+      indices.drift(j).ipsi.trial_rep= find(ind_drift_ipsi(:,j)==1); % index of where j trial is in entire trial sequence 
+      indices.drift(j).ipsi.pos= stimulus_drift_ipsi(j,:); 
+
+    %now organize for sf 
+        for l= 1:length(unique_sf_flash_ipsi)
+            indices.drift(l).ipsi.sfloc= find (stimulus_drift_ipsi(:,1)==unique_sp_drift_ipsi(l)); %index to find this trial in  
+            indices.drift(l).ipsi.sf=unique_sf_drift_ipsi(l); %what is the actual spatial frequency value
+        end 
+    % now organize for ori
+        for m= 1:length(unique_ori)
+            indices.drift(m).ipsi.oriloc= find (stimulus_drift_ipsi(:,2)==unique_ori_drift_ipsi(m)); %index to find this trial in  
+            indices.drift(m).ipsi.ori=unique_ori_drift_ipsi(m); %what is the actual orientation value
+        end 
+
+    % now index into dfoF file to make a new structure for each cell ROI  
+        for k=1: numCells %for every cell, per each unique trial (a row in dfof trace)
+            dFoF.drift.ipsi.conds(j).cells(k).trial_num=indices_drift(j).ipsi.trial_rep; %unique trial ID 
+            dFoF.drift.ipsi.conds(j).cells(k).peak=dFoF_on_peak_drift_ipsi(k, indices.drift(j).ipsi.trial_rep); 
+            dFoF.drift.ipsi.conds(j).cells(k).mean_peak=mean(dFoF_on_peak_drift_ipsi(k, indices.drift(j).ipsi.trial_rep));
+            dFoF.drift.ipsi.conds(j).cells(k).var=var(dFoF_on_drift_ipsi(k, indices.drift(j).ipsi.trial_rep), 0); 
+            dFoF.drift.ipsi.conds(j).cells(k).traces=dFoF_on_drift_ipsi(k, indices.drift(j).ipsi.trial_rep); 
+            dFoF.drift.ipsi.conds(j).cells(k).avg_trace=mean(dFoF_on_drift_ipsi(k, indices.drift(j).ipsi.trial_rep),2);
+            dFoF.drift.ipsi.conds(j).cells(k).std_trace=std(dFoF_on_drift_ipsi(k, indices.drift(j).ipsi.trial_rep));
+            
+            dFoF.drift.ipsi.conds(j).cells(k).off_mean=mean(dFoF_off_drift_ipsi(k, indices.drift(j).ipsi.trial_rep)); 
+            dFoF.drift.ipsi.conds(j).cells(k).off_traces=dFoF_off_drift_ipsi(k, indices.drift(j).ipsi.trial_rep);
+            dFoF.drift.ipsi.conds(j).cells(k).off_std=std(dFoF_off_drift_ipsi(k, indices.drift(j).ipsi.trial_rep)); 
+            dFoF.drift.ipsi.conds(j).cells(k).trace=alldFoF_drift_ipsi(k,indices.drift(j).ipsi.trial_rep); %whole trace 
+    %   dFoF_conds(j).cells(k).std_trace=std(abs(dFoF_during(k, indices(j).drift_trial_rep),2));
+        end
+    end
+end
+
+%% organize condition for test of visually responsivity- DRIFTING GRATINGS 
+
+if binocular_exp==1
+%update this section 10/7/22 LSF 
+
+median_drift_contra_dFoF= zeros(1, numCells); 
+median_drift_contra_dFoF= zeros(1, numCells);
+
+%Do this for both eyes     
+for i=1:numCells
+    median_drift_contra_dFoF(i)=median(alldFoF_drift_contra(i,:),'all'); %contralateral eye
+    median_drift_ipsi_dFoF(i)= median(alldFoF_drift_ipsi(i,:),'all'); % ipsilateral eye 
+end 
+
+std_lowerdFoF_drift_contra= zeros(1, numCells); 
+std_lowerdFoF_drift_ipsi= zeros(1, numCells); 
+
+for i=1:numCells
+    indices(i).drift.contra.std = find(alldFoF_drift_contra(i,:)<0); %contralateral eye 
+    std_lowerdFoF_drift_contra(i)= std(alldFoF_drift_contra(i,indices(i).drift.contra.std));
+    indices(i).drift.ipsi.std = find(alldFoF_drift_ipsi(i,:)<0); %ipsilateral eye 
+    std_lowerdFoF_drift_ipsi(i)= std(alldFoF_drift_ipsi(i,indices(i).drift.ipsi.std));
+end
+
+%threshold of activity/ visual responsivity for each eye 
+threshold_active_contra=std_lowerdFoF_drift_contra*3.72; 
+threshold_active_ipsi=std_lowerdFoF_drift_ipsi*3.72; 
+
+%for contralateral eye 
+for qq=1:unique_trialnum_drift_contra 
+    for kk=1:numCells
+        stimconds_drift_contra(qq, 1:(length(dFoF.drift.contra.conds(j).cells(k).peak)), kk)= cat(1,dFoF.drift.contra.conds(j).cells(k).peak); %each slice is a cell, each row a unique trial and column a rep of that trial  
+        stimconds_drift_contra_trials(qq,1:(length(dFoF.drift.contra.conds(j).cells(k).trial_num)), kk)= cat(1,dFoF.drift.contra.conds(j).cells(k).trial_num); 
+        stimconds_drift_contra_off(qq, 1:(length(dFoF.drift.contra.conds(j).cells(k).off_traces)), kk)= cat(1,dFoF.drift.contra.conds(j).cells(k).off_traces); %each slice is a cell, each row a unique trial and column a rep of that trial         
+    end
+end
+
+%for ipsilateral eye 
+for qq=1:unique_trialnum_drift_ipsilateral  
+    for kk=1:numCells
+        stimconds_drift_ipsi(qq, 1:(length(dFoF.drift.ipsi.conds(j).cells(k).peak)), kk)= cat(1,dFoF.drift.ipsi.conds(j).cells(k).peak); %each slice is a cell, each row a unique trial and column a rep of that trial  
+        stimconds_drift_ipsi_trials(qq,1:(length(dFoF.drift.ipsi.conds(j).cells(k).trial_num)), kk)= cat(1,dFoF.drift.ipsi.conds(j).cells(k).trial_num); 
+        stimconds_drift_ipsi_off(qq, 1:(length(dFoF.drift.ipsi.conds(j).cells(k).off_traces)), kk)= cat(1,dFoF.drift.ipsi.conds(j).cells(k).off_traces); %each slice is a cell, each row a unique trial and column a rep of that trial         
+    end
+end
+
+%stimconds matrix will be 45(unique trials)x 8(reps)x 370 (cells) 
+%for contralateral eye 
+stimconds_drift_contra(stimconds_drift_contra==0)=nan;
+stimconds_drift_contra= permute(stimconds_drift_contra, [2 1 3]);% make column-wise so reps are in the same column
+
+stimconds_drift_contra_off(stimconds_drift_contra_off==0)=nan;
+stimconds_drift_contra_off= permute(stimconds_drift_contra_off, [2 1 3]);% make column-wise so reps are in the same column
+
+stimconds_drift_contra_trials(stimconds_drift_contra_trials==0)=nan;
+stimconds_drift_contra_trials= permute(stimconds_drift_contra_trials, [2 1 3]);
+
+%for ipsilateral eye 
+stimconds_drift_ipsi(stimconds_drift_ipsi==0)=nan;
+stimconds_drift_ipsi= permute(stimconds_drift_ipsi, [2 1 3]);% make column-wise so reps are in the same column
+
+stimconds_drift_ipsi_off(stimconds_drift_ipsi_off==0)=nan;
+stimconds_drift_ipsi_off= permute(stimconds_drift_ipsi_off, [2 1 3]);% make column-wise so reps are in the same column
+
+stimconds_drift_ipsi_trials(stimconds_drift_ipsi_trials==0)=nan;
+stimconds_drift_ipsi_trials= permute(stimconds_drift_ipsi_trials, [2 1 3]);
+
+%Calculate reliability metrics for each eye : 
+for j=1:unique_trialnum_drift_contra
+    for q=1:numCells
+        response_CV_contra(j,q)= std(stimconds_drift_contra(:,j,q)) ./ mean(stimconds_drift_contra(:,j,q)); %response reliability metric for each stimulus condition 
+    end
+end
+
+for j=1:unique_trialnum_drift_ipsi
+    for q=1:numCells
+        response_CV_ipsi(j,q)= std(stimconds_drift_ipsi(:,j,q)) ./ mean(stimconds_drift_ipsi(:,j,q)); %response reliability metric for each stimulus condition 
+    end
+end
+end
+
+%% does each eye have a significant visual response to DRIFTING gratings? 
+%test again the set threshold "threshold_active_contra" or
+%"threshold_active_ipsi" 
+%this method is from Rose, Jaepel, Hubener, and Bonhoeffer, 2016.
+%"Cell-specific restoration of stimulus preference after monocular deprivation in the visual cortex"
+%Science, doi: 10.1126/science.aad3358
+
+visresp_cells_drift_contra=zeros(unique_trialnum_drift_contra, numCells); 
+visresp_cells_drift_ipsi=zeros(unique_trialnum_drift_ipsi, numCells); 
+
+%for contralateral eye responses 
+for q=1:numCells
+    for j=1:unique_trialnum_drift_contra % done across reps and stim on vs. stim off        
+        if length(find(stimconds_drift_contra(:,j,q)>= threshold_active_contra(q)))>1 
+            visresp_cells_drift_contra(j,q)=1; %matrix of vis resp cells, 0/1
+        end
+    end
+end
+
+%for ipsilateral eye responses 
+for q=1:numCells
+    for j=1:unique_trialnum_drift_ipsi % done across reps and stim on vs. stim off        
+        if length(find(stimconds_drift_ipsi(:,j,q)>= threshold_active_ipsi(q)))>1 
+            visresp_cells_drift_ipsi(j,q)=1; %matrix of vis resp cells, 0/1
+        end
+    end
+end
+
+%check to see in how many cells there is a threshold cross 
+visresp_cells_total_drift_contra=zeros(1,numCells); 
+visresp_cells_total_drift_ipsi =zeros(1,numCells); 
+
+%contralateral eye 
+for q=1:numCells
+    if length(find(visresp_cells_drift_contra(:,q)==1))>=1
+        visresp_cells_total_drift_contra(q)=1; 
+    end
+end
+
+%ipsilateral eye 
+for q=1:numCells
+    if length(find(visresp_cells_drift_ipsi(:,q)==1))>=1
+        visresp_cells_total_drift_ipsi(q)=1; 
+    end
+end
+
+%make matrix to code for whether cell was responsive to neither eye (0),
+%contralateral (1), ipsilateral (2), or both (3) 
+
+visresp_cells_total=zeros(1,numCells);
+for q=1:numCells 
+    if (length(find(visresp_cells_total_drift_contra(q)==1))==0) && (length(find(visresp_cells_total_drift_ipsi(q)==1))==0) 
+        visresp_cells_total(q)=0; %then not responsive to input from either eye 
+    elseif (length(find(visresp_cells_total_drift_contra(q)==1))==1) && (length(find(visresp_cells_total_drift_ipsi(q)==1))==0) 
+        visresp_cells_total(q)=1; %only contralateral eye 
+    elseif (length(find(visresp_cells_total_drift_contra(q)==1))==0) && (length(find(visresp_cells_total_drift_ipsi(q)==1))==1) 
+        visresp_cells_total(q)=2; %only ipsilateral eye 
+    elseif (length(find(visresp_cells_total_drift_contra(q)==1))==1) && (length(find(visresp_cells_total_drift_ipsi(q)==1))==1) 
+        visresp_cells_total(q)=3; %both eyes 
+    end
+end
+
+%% plot percent visually responsive 
+
+num_visresp=length(find(visresp_cells_total>1));
+percent_visresp=num_visresp/numCells; 
+
+plotresponsivecells(num_visresp,numCells,SaveDir);     
+
+%% store data so far in structure
+%across all conditions 
+
+AllConds.drift.contra.ResponseCV=response_CV_contra; 
+AllConds.drift.ipsi.ResponseCV=response_CV_ipsi; 
+AllConds.drift.contra.peak=stimconds_drift_contra; %peak responses by unique trial x reps x cells 
+AllConds.drift.contra.off=stimconds_drift_contra_off; %off trials dFoF by unique trial x reps x cells
+AllConds.drift.contra.trials=stimconds_drift_trials; %indices for trials by unique trial x reps x cells
+AllConds.drift.ipsi.peak=stimconds_drift_contra; %peak responses by unique trial x reps x cells 
+AllConds.drift.ipsi.off=stimconds_drift_contra_off; %off trials dFoF by unique trial x reps x cells
+AllConds.drift.ipsi.trials=stimconds_drift_trials; %indices for trials by unique trial x reps x cells
+AllConds.drift.cellID=visresp_cells_total; 
+
+%% DRIFTING GRATINGS- now look at orientation and spatial frequency preferences 
+%for visually responsive cells 
+
+%contralateral eye 
+for kk=1:numCells
+        for j=1:length(unique_sf_drift_contra) %spatial freq
+            dFoF.drift.contra.sf(j).cells(kk).peak= dFoF_on_peak_drift_contra(kk, indices.drift(j).contra.sfloc);
+            dFoF.drift.contra.sf(j).cells(kk).traces= dFoF_on_drift_contra(kk, indices.drift(j).contra.sfloc);
+            dFoF.drift.contra.sf(j).cells(kk).avgtrace= mean(dFoF_on_drift_contra(kk, indices.drift(j).contra.sfloc),2);
+        end
+        for k=1:length(unique_ori_drift_contra) %orientation
+            dFoF.drift.contra.ori(k).cells(kk).peak= dFoF_on_peak_drift_contra(kk, indices.drift(k).contra.oriloc);
+            dFoF.drift.contra.ori(j).cells(kk).traces= dFoF_on_drift_contra(kk, indices.drift(k).contra.oriloc);
+            dFoF.drift.contra.ori(j).cells(kk).avgtrace= mean(dFoF_on_drift_contra(kk, indices.drift(k).contra.oriloc),2);
+        end
+end
+%ipsilateral eye 
+for kk=1:numCells
+        for j=1:length(unique_sf_drift_ipsi) %spatial freq
+            dFoF.drift.ipsi.sf(j).cells(kk).peak= dFoF_on_peak_drift_ipsi(kk, indices.drift(j).ipsi.sfloc);
+            dFoF.drift.ipsi.sf(j).cells(kk).traces= dFoF_on_drift_ipsi(kk, indices.drift(j).ipsi.sfloc);
+            dFoF.drift.ipsi.sf(j).cells(kk).avgtrace= mean(dFoF_on_drift_ipsi(kk, indices.drift(j).ipsi.sfloc),2);
+        end
+        for k=1:length(unique_ori_drift_ipsi) %orientation
+            dFoF.drift.ipsi.ori(k).cells(kk).peak= dFoF_on_peak_drift_ipsi(kk, indices.drift(k).ipsi.oriloc);
+            dFoF.drift.ipsi.ori(j).cells(kk).traces= dFoF_on_drift_ipsi(kk, indices.drift(k).ipsi.oriloc);
+            dFoF.drift.ipsi.ori(j).cells(kk).avgtrace= mean(dFoF_on_drift_ipsi(kk, indices.drift(k).ipsi.oriloc),2);
+        end
+end
+
+% CONTRALATERAL EYE 
+%organize by sf 
+for qq=1:length(unique_sf_drift_contra)
+    for kk=1:numCells
+        resp_sf_drift_contra(qq, 1:(length(dFoF.drift.contra.sf(qq).cells(kk).peak)), kk)= cat(1,dFoF.drift.contra.sf(qq).cells(kk).peak); %each slice is a cell, each row a unique trial and column a rep of that trial  
+    end
+end
+%organize by ori 
+for qq=1:length(unique_ori_drift_contra)
+    for kk=1:numCells
+        resp_ori_drift_contra(qq, 1:(length(dFoF.drift.contra.ori(qq).cells(kk).peak)), kk)= cat(1,dFoF.drift.contra.ori(qq).cells(kk).peak); %each slice is a cell, each row a unique trial and column a rep of that trial  
+    end
+end
+
+% IPSILATERAL EYE 
+%organize by sf 
+for qq=1:length(unique_sf_drift_ipsi)
+    for kk=1:numCells
+        resp_sf_drift_ipsi(qq, 1:(length(dFoF.drift.ipsi.sf(qq).cells(kk).peak)), kk)= cat(1,dFoF.drift.ipsi.sf(qq).cells(kk).peak); %each slice is a cell, each row a unique trial and column a rep of that trial  
+    end
+end
+%organize by ori 
+for qq=1:length(unique_ori_drift_ipsi)
+    for kk=1:numCells
+        resp_ori_drift_ipsi(qq, 1:(length(dFoF.drift.ipsi.ori(qq).cells(kk).peak)), kk)= cat(1,dFoF.drift.ipsi.ori(qq).cells(kk).peak); %each slice is a cell, each row a unique trial and column a rep of that trial  
+    end
+end
+
+
+%rearrange so that reps are in a column, each slice is a cell, and each
+%trial is a row 
+
+%CONTRALATERAL EYE 
+%spatial frequency 
+resp_sf_drift_contra(resp_sf_drift_contra==0)=nan;
+resp_sf_drift_contra= permute(resp_sf_drift_contra, [2 1 3]);
+sf_trialnum_drift_contra=length(dFoF.drift.contra.ori.sf(1).cells(1).peak); 
+
+%orientation
+resp_ori_drift_contra(resp_ori_drift_contra==0)=nan;
+resp_ori_drift_contra= permute(resp_ori_drift_contra, [2 1 3]);
+ori_trialnum_drift_contra=length(dFoF.drift.contra.ori(1).cells(1).peak); 
+
+
+%IPSILATERAL EYE 
+%spatial frequency
+resp_sf_drift_ipsi(resp_sf_drift_ipsi==0)=nan;
+resp_sf_drift_ipsi= permute(resp_sf_drift_ipsi, [2 1 3]);
+sf_trialnum_drift_ipsi=length(dFoF.drift.ipsi.ori.sf(1).cells(1).peak); 
+
+%orientation
+resp_ori_drift_ipsi(resp_ori_drift_ipsi==0)=nan;
+resp_ori_drift_ipsi= permute(resp_ori_drift_ipsi, [2 1 3]);
+ori_trialnum_drift_ipsi=length(dFoF.drift.ipsi.ori(1).cells(1).peak); 
+
+%select only CONTRALATERAL responsive cells 
+%indices 
+indices(1).drift(1).contra(1).respcells = find(visresp_cells_total==1); %indices of responsive cells 
+numDrift_contra= length(find(visresp_cells_total==1)); 
+sf_respcells_drift_contra=zeros(sf_trialnum_drift_contra, length(unique_sf_drift_contra), numDrift_contra); %initialize matrices
+ori_respcells_drift_contra=zeros(ori_trialnum_drift_contra, length(unique_ori_drift_contra), numDrift_contra); 
+
+for i=1:numDrift_contra 
+    sf_respcells_drift_contra(:,:,i)= resp_sf_drift_contra(:,:,indices(1).drift(1).contra(1).respcells(i));
+    ori_respcells_drift_contra(:,:,i)= resp_ori_drift_contra(:,:,indices(1).drift(1).contra(1).respcells(i));
+end
+
+%select only IPSILATERAL responsive cells 
+%indices 
+indices(1).drift(1).ipsi(1).respcells = find(visresp_cells_total==2); %indices of responsive cells 
+numDrift_ipsi= length(find(visresp_cells_total==2)); 
+sf_respcells_drift_ipsi=zeros(sf_trialnum_drift_ipsi, length(unique_sf_drift_ipsi), numDrift_ipsi); %initialize matrices
+ori_respcells_drift_ipsi=zeros(ori_trialnum_drift_ipsi, length(unique_ori_drift_ipsi), numDrift_ipsi); 
+
+for i=1:numDrift_ipsi
+    sf_respcells_drift_ipsi(:,:,i)= resp_sf_drift_ipsi(:,:,indices(1).drift(1).ipsi(1).respcells(i));
+    ori_respcells_drift_ipsi(:,:,i)= resp_ori_drift_ipsi(:,:,indices(1).drift(1).ipsi(1).respcells(i));
+end
+
+%select  BINOCULAR cells 
+%indices -- 
+indices(1).drift(1).binoc(1).respcells = find(visresp_cells_total==3); %indices of responsive cells 
+numDrift_binoc= length(find(visresp_cells_total==3)); 
+
+sf_respcells_drift_binoc_add= zeros(sf_trialnum_drift_contra, length(unique_sf_drift_contra), numDrift_binoc); %initialize matrices
+ori_respcells_drift_binoc_add= zeros(ori_trialnum_drift_contra, length(unique_ori_drift_contra), numDrift_binoc); 
+sf_respcells_drift_binoc_contra=zeros(sf_trialnum_drift_contra, length(unique_sf_drift_contra), numDrift_binoc); 
+sf_respcells_drift_binoc_ipsi=zeros(sf_trialnum_drift_ipsi, length(unique_sf_drift_ipsi), numDrift_binoc); 
+ori_respcells_drift_binoc_contra=zeros(ori_trialnum_drift_contra, length(unique_ori_drift_contra), numDrift_binoc); 
+ori_respcells_drift_binoc_ipsi=zeros(ori_trialnum_drift_ipsi, length(unique_ori_drift_ipsi), numDrift_binoc);
+
+for i=1:numDrift_binoc
+    %added responses, will need for ODI calculation 
+    sf_respcells_drift_binoc_add (:,:,i)= resp_sf_drift_contra(:,:,indices(1).drift(1).contra(1).respcells(i)) + resp_sf_drift_ipsi(:,:,indices(1).drift(1).ipsi(1).respcells(i));
+    ori_respcells_drift_binoc_add (:,:,i)= resp_ori_drift_contra(:,:,indices(1).drift(1).contra(1).respcells(i))+ resp_ori_drift_ipsi(:,:,indices(1).drift(1).ipsi(1).respcells(i)); 
+    
+    %binocular neurons' responses to either eye individually 
+    sf_respcells_drift_binoc_contra(:,:,i)= resp_sf_drift_contra(:,:,indices(1).drift(1).binoc(1).respcells(i));  
+    sf_respcells_drift_binoc_ipsi(:,:,i)=resp_sf_drift_ipsi(:,:,indices(1).drift(1).binoc(1).respcells(i));
+    ori_respcells_drift_binoc_contra(:,:,i)= resp_ori_drift_contra(:,:,indices(1).drift(1).binoc(1).respcells(i));
+    ori_respcells_drift_binoc_ipsi(:,:,i)= resp_ori_drift_ipsi(:,:,indices(1).drift(1).binoc(1).respcells(i));
+end
+
+%output= 3 matrices containing responses peak to spatial frequency and
+%orientations (in sorted order) for every cell (responsive or not), if cell
+%is not responsive then value of array will be 0 
+
+
+
+%%  orientation tuning 
+%orientation preference for contralateral, ipsilateral eye 
+%use Tan et al., 2021 Current Biology for orientation and spatial frequency
+%preference calcultion 
+
+%-----CONTRALATERAL MONOCULAR NEURONS-----for cells that are CONTRALATERAL responsive, find preferred orientation
+
+%average by SF and orientation 
+for i=1:numDrift_contra
+    for j=1:length(unique_sf_drift_contra)
+        avg_sf_drift_contra(j,i)=mean(sf_respcells_drift_contra(:,j,i)); 
+    end
+    for k=1:length (unique_ori_drift_contra)
+        avg_ori_drift_contra(k,i)=mean(ori_respcells_drift_contra(:,k,i));
+    end
+end
+
+%orientation tuning and circular variance 
+[ori_contra_est, cv_contra]= getorituning(unique_ori_drift_contra, avg_ori_drift_contra); 
+SigCells.drift.contra(j).pref_ori=ori_contra_est(j); 
+SigCells.drift.contra(j).cv=cv_contra(j); 
+
+%spatial frequency tuning
+
+%---------IPSILATERAL MONOCULAR NEURONS------for cells that are ipsilateral responsive, find  preferred orientation
+
+for i=1:numDrift_ipsi
+    for j=1:length(unique_sf_drift_ipsi)
+        avg_sf_drift_ipsi(j,i)=mean(sf_respcells_drift_ipsi(:,j,i)); %get trial averaged responses 
+    end
+    for k=1:length (unique_ori_drift_ipsi)
+        avg_ori_drift_ipsi(k,i)=mean(ori_respcells_drift_ipsi(:,k,i)); %get trial averaged responses 
+    end
+end
+
+%orientation tuning 
+[ori_ipsi_est, cv_ipsi]= getorituning(unique_ori_drift_ipsi, avg_ori_drift_ipsi); 
+SigCells.drift.ipsi(j).pref_ori=ori_ipsi_est(j); 
+SigCells.drift.ipsi(j).cv=cv_ipsi(j); 
+ 
+
+%------BINOCULAR NEURONS-----for cells that are binocular, find preferred orientation and spatial
+%frequency for either eye separately 
+
+for i=1:numDrift_binoc
+    for j=1:length(unique_sf_drift_ipsi)
+        avg_sf_drift_binoc_contra(j,i)=mean(sf_respcells_drift_binoc_contra(:,j,i)); 
+        avg_sf_drift_binoc_ipsi(j,i)=mean(sf_respcells_drift_binoc_ipsi(:,j,i)); 
+    end
+    for k=1:length (unique_ori_drift_ipsi)
+        avg_ori_drift_binoc_contra(k,i)=mean(ori_respcells_drift_binoc_contra(:,k,i));
+        avg_ori_drift_binoc_ipsi(k,i)=mean(ori_respcells_drift_binoc_ipsi(:,k,i));
+    end
+end
+
+%contralateral eye responses
+[ori_binoc_contra_est, cv_binoc_contra]= getorituning(unique_ori_drift_contra, avg_ori_drift_binoc_contra); 
+SigCells.drift.binoc(j).contra.pref_ori=ori_binoc_contra_est(j); 
+SigCells.drift.binoc(j).contra.cv=cv_binoc_contra(j); 
+
+%ipsilateral eye responses 
+[ori_binoc_ipsi_est, cv_binoc_ipsi]= getorituning(unique_ori_drift_ipsi, avg_ori_drift_binoc_ipsi); 
+SigCells.drift.binoc(j).ipsi.pref_ori=ori_binoc_ipsi_est(j); 
+SigCells.drift.binoc(j).ipsi.cv=cv_binoc_ipsi(j); 
+ 
+
+ori_drift_pref=struct('contra', ori_contra_est, 'ipsi', ori_ipsi_est,...
+    'binoc_contra',ori_binoc_contra_est, 'binoc_ipsi', ori_binoc_ipsi_est,...
+    'cv_contra', cv_contra, 'cv_ipsi', cv_ipsi, 'cv_binoc_contra', cv_binoc_contra,...
+    'cv_binoc_ipsi', cv_binoc_ipsi); 
+ori_drift_responses= struct('contra', avg_ori_drift_contra, 'ipsi', avg_ori_drift_ipsi,...
+    'binoc_contra',avg_ori_drift_binoc_contra, 'binoc_ipsi', avg_ori_drift_binoc_ipsi); 
+
+%% store data so far in a structure 
+%store orientation and sf matrices 
+
+%only the cells that had significant visual responses above threshold 
+%num_visresp
+    SigCells.ID.drift.contra=indices(1).drift(1).contra(1).respcells; %which are the contralateral monocular responsive neurons? 
+    SigCells.ID.drift.ipsi=indices(1).drift(1).ipsi(1).respcells; % which are the ipsilateral monocular responsive neurons? 
+    SigCells.ID.drift.binoc=indices(1).drift(1).binoc(1).respcells; %which are binocular neurons?
+    SigCells.drift.contra.sf.trials= unique_sf_drift_contra; % what are the unique sf trials?   
+    SigCells.drift.contra.ori.trials= unique_ori_drift_contra; %unique ori trials? 
+    SigCells.drift.ipsi.sf.trials= unique_sf_drift_ipsi; % what are the unique sf trials?   
+    SigCells.drift.ipsi.ori.trials= unique_ori_drift_ipsi; %unique ori trials? 
+
+for i=1:numDrift_contra  %for CONTRALATERAL responsive neurons
+    for j=1:length(unique_sf_drift_contra)
+            SigCells.drift.contra(i).sf(j).peaks= sf_respcells_drift_contra(j,:,i); %peak responses for each condition 
+            SigCells.drift.contra(i).sf(j).traces= dFoF.drift.contra.sf(j).cells(indices(1).drift(1).contra(1).respcells(i)).traces
+            SigCells.drift.contra(i).sf(j).avgtrace= dFoF.drift.contra.sf(j).cells(indices(1).drift(1).contra(1).respcells(i)).avgtrace
+    end
+    for k=1:length(unique_ori_drift_contra)
+            SigCells.drift.contra(i).ori(k).peaks= ori_respcells_drift_contra(k,:,i); %peak responses for each condition 
+            SigCells.drift.contra(i).ori(k).traces= dFoF.drift.contra.ori(k).cells(indices(1).drift(1).contra(1).respcells(i)).traces
+            SigCells.drift.contra(i).ori(k).avgtrace= dFoF.drift.contra.ori(k).cells(indices(1).drift(1).contra(1).respcells(i)).avgtrace
+    end
+end
+
+for i=1:numDrift_ipsi  %for IPSILATERAL neurons
+    for j=1:length(unique_sf_drift_ipsi)
+            SigCells.drift.ipsi(i).sf(j).peaks= sf_respcells_drift_ipsi(j,:,i); %peak responses for each condition 
+            SigCells.drift.ipsi(i).sf(j).traces= dFoF.drift.ipsi.sf(j).cells(indices(1).drift(1).ipsi(1).respcells(i)).traces
+            SigCells.drift.ipsi(i).sf(j).avgtrace= dFoF.drift.ipsi.sf(j).cells(indices(1).drift(1).ipsi(1).respcells(i)).avgtrace
+    end
+    for k=1:length(unique_ori_drift_ipsi)
+            SigCells.drift.ipsi(i).ori(k).peaks= ori_respcells_drift_ipsi(k,:,i); %peak responses for each condition 
+            SigCells.drift.ipsi(i).ori(k).traces= dFoF.drift.ipsi.ori(k).cells(indices(1).drift(1).ipsi(1).respcells(i)).traces
+            SigCells.drift.ipsi(i).ori(k).avgtrace= dFoF.drift.ipsi.ori(k).cells(indices(1).drift(1).ipsi(1).respcells(i)).avgtrace
+    end
+end
+
+
+for i=1:numDrift_binoc  %for BINOCULAR neurons
+    for j=1:length(unique_sf_drift_contra) %contralateral eye responses
+            SigCells.drift.binoc(i).contra.sf(j).peaks= sf_respcells_drift_binoc_contra(j,:,i); %peak responses for each condition 
+            SigCells.drift.binoc(i).contra.sf(j).traces= dFoF.drift.contra.sf(j).cells(indices(1).drift(1).contra(1).respcells(i)).traces
+            SigCells.drift.binoc(i).contra.sf(j).avgtrace= dFoF.drift.contra.sf(j).cells(indices(1).drift(1).contra(1).respcells(i)).avgtrace
+    end
+    for k=1:length(unique_ori_drift_contra)
+            SigCells.drift.binoc(i).contra.ori(k).peaks= ori_respcells_drift_binoc_contra(k,:,i); %peak responses for each condition 
+            SigCells.drift.binoc(i).contra.ori(k).traces= dFoF.drift.contra.ori(k).cells(indices(1).drift(1).binoc(1).respcells(i)).traces
+            SigCells.drift.binoc(i).contra.ori(k).avgtrace= dFoF.drift.contra.ori(k).cells(indices(1).drift(1).binoc(1).respcells(i)).avgtrace
+    end
+
+    for q=1:length(unique_sf_drift_ipsi) %ipsilateral eye responses 
+            SigCells.drift.binoc(i).ipsi.sf(q).peaks= sf_respcells_drift_binoc_ipsi(q,:,i); %peak responses for each condition 
+            SigCells.drift.binoc(i).ipsi.sf(q).traces= dFoF.drift.ipsi.sf(q).cells(indices(1).drift(1).binoc(1).respcells(i)).traces
+            SigCells.drift.binoc(i).ipsi.sf(q).avgtrace= dFoF.drift.ipsi.sf(q).cells(indices(1).drift(1).binoc(1).respcells(i)).avgtrace
+    end
+    for n=1:length(unique_ori_drift_ipsi)
+            SigCells.drift.binoc(i).ipsi.ori(n).peaks= ori_respcells_drift_binoc_ipsi(n,:,i); %peak responses for each condition 
+            SigCells.drift.binoc(i).ipsi.ori(n).traces= dFoF.drift.ipsi.ori(n).cells(indices(1).drift(1).binoc(1).respcells(i)).traces
+            SigCells.drift.binoc(i).ipsi.ori(n).avgtrace= dFoF.drift.ipsi.ori(n).cells(indices(1).drift(1).binoc(1).respcells(i)).avgtrace
+    end
+end
+
+% save this structure 
+
+%% plot preferred orientation 
+
+%a polar plot per cell 
+plot_ori_polar(SigCells); 
+
+
+%% TUNING CURVES- CIRCULAR VARIANCE
+
+%% ORIENTATION SELECTIVITY 
+
+
+%% plot tuning curves and orientation preferences 
+
+
+
+

@@ -1,0 +1,186 @@
+function [outputArg1,outputArg2] = analysis2p()
+%calculate the response properties of every cell 
+
+%requires the following files:
+   % 1. Scanbox .mat file that contains the TTL pulse frame numbers for
+   % stim on/off
+   % 2. Suite2p folder that contains fluorescence traces for each ROI and
+   % deconvolved spiking
+   % 3. CSV file contain specific sequence of stimuli and their parameters,
+   % ori, sf, and sp-> this file is exported by Psychopy upon completion of
+   % expeimrent
+
+%which indicator
+indicator='f'; %gCamp6f 
+
+%baseline frame window
+bsF= 2; %number of frames for baseline 
+
+%% load the data 
+
+animal = input('Please enter animal ID:', 's'); %ask user for the animal ID
+day= input ('Please enter day of recording:','s'); %ask user for day e.g. "D1"
+fov= input('Please enter fov:','s'); %user for fov eg. "000"
+exp=input ('Please enter exp:','s'); %ask user for exp eg. "001" 
+
+%load the sbx .mat file with the stimulus frame on/off index
+[stim_info] = loadsbxmat(animal,day,fov, exp); 
+
+%load the suite2p data 
+[Fall] = loadsuite2p(animal,day,fov, exp); 
+
+%load the stimulus information, loaded as a table  
+[stim_table] = loadstimid(animal,day,fov, exp);
+
+%% load sbx parameters
+
+if isfield (info, 'recordsPerBuffer_bi') %bidirectional scanning or not 
+    scanmode=2; 
+else
+    scanmode=1; %if not, then unidirectional (~15 frames/ s) 
+end
+
+%get stim on/off indices 
+%output structure contains 4 fields: drift_stim_on, drift_stim_off, 
+%flash_stim_on and flash_stim_off 
+[stim_frame] = trialinfo(info); 
+
+
+%% extract data from suite2p Fall .mat file 
+
+%neuropil correction factor 
+corr_factor=.7; %according to suite2p documentation, we can start with this
+
+%get the indices of cells, don't do this analysis for non-cell ROIs 
+iscellind= find (iscell(:,1)==1); %indices of cells 
+
+for i=1:length(iscellind)
+    if max(F(i,:))-min(F(i,:))==0
+        iscellind(i)=0; %remove any traces that are zero
+    end
+end 
+iscellind(iscellind==0)=[]; 
+
+numCells=length(iscellind); % count all 'iscell'= total ROIs that are cells
+cells.total.GCaMP=numCells; %make structure with cell information 
+
+%neuropil correction of F
+F_corr_cells= F(iscellind,:)-(corr_factor*Fneu(iscellind,:)); %extract info only for cells 
+
+%normalize fluorescences (you don't want negative fluorescence), make min 0
+F_corr_cells=F_corr_cells-min(F_corr_cells, [], 2); 
+
+Fneu_cell=Fneu(iscellind,:); %neuropil for cells 
+F_cell=F(iscellind,:); %F raw for cells 
+
+%% get cell ROI positions 
+
+for n=1:length(iscellind) %get location info for each cell ROI
+	cell_stat{1,n}.xpix=stat{1,iscellind(n)}.xpix; %xpixels
+    cell_stat{1,n}.ypix=stat{1,iscellind(n)}.ypix; %ypixels
+    cell_stat{1,n}.xcirc=stat{1,iscellind(n)}.xcirc; %neuropil mask xpix
+    cell_stat{1,n}.ycirc=stat{1,iscellind(n)}.ycirc; %neuropil mask ypix
+end
+
+%% calculate dF/F of F_corr for trials 
+
+%get unique trial frame  information
+[unique_trial, unique_drift, unique_flash] = uniquetrial(stim_table);
+
+%get stimulus parameters in order of presentation 
+%for drifting stimulus 
+drift_stim(:,1)= stim_table.SpatialFreq(1:160);%sf
+drift_stim(:,2)= stim_table.orientation(1:160);%ori
+
+%for flashing stimulus 
+flash_stim(:,1)= stim_table.SpatialFreq(161:end)%sf
+flash_stim(:,2)= stim_table.orientation(161:end)%ori
+flash_stim(:,3)= stim_table.SpatialPhase(161:end)%sp
+
+%for drifting stimulus, get unique trials for each parameter 
+drift_sfs= unique (unique_drift(:,1)); 
+drift_oris= unique (unique_drift(:,2)); 
+
+%for flashing stimulus, get unique trials for each parameter 
+flash_sfs= unique (unique_flash(:,1)); 
+flash_oris= unique (unique_flash(:,2)); 
+flash_sfs= unique (unique_flash(:,3)); 
+
+
+unique_flash_trialnum= size (unique_flash,1); %number of unique flashing trial conditions 
+unique_drift_trialnum= size (unique_drift,1); %number of unique drift trial conditions
+
+numstd=3; %thresholding for response amplitude
+ca_delay=7; %calcium indicator delay in frames 
+
+%get dF/F for during stim and stim off (gray blank) 
+[dFoF_on,dFoF_off] = dFoF(stim_frame,F_corr_cells, bsF); %use stim_frame to index into fluo trace 
+
+%make structure containing indices for unique trials to organize dF/F with
+
+
+%indices for trials will also become indices for df/f trace since we used
+%trial onset to make this file 
+
+for j=1:unique_drift_trialnum % for every unique trial , one field in index 
+    drift_ind(:,j)= ismember(drift_stim, unique_drift (j,:), 'rows'); % where is jth unique trial in the whole trial sequence? 
+    indices(j).drift_trial_rep= find(drift_ind(:,j)==1); % index of where j trial is in entire trial sequence 
+
+    %now also organize by sf, ori
+    for l= 1:length(drift_oris)
+        indices(l).drift_ori= find (unique_drift(:,2)==drift_oris(l)); %index to find this trial in  
+        indices(l).drift_ori_dum=drift_oris(l); %what is the actual orientation value
+    end 
+
+    for l= 1:length(drift_sfs)
+        indices(l).drift_sf= find (unique_drift(:,2)==drift_sfs(l)); %index to find this trial in  
+        indices(l).drift_sf_dum=drift_sfs(l); %what is the actual sf value
+    end 
+
+    % now index into dfoF file to make a new structure for each cell ROI 
+    
+    for k=1: numCells %for every cell, per each unique trial (a row in dfof trace)
+        dFoF_conds(j).cells(k).drift_trial_num=indices(j).drift_trial_rep; %unique trial ID 
+        dFoF_conds(j).cells(k).mean=mean(dFoF_on(k, indices(j).drift_trial_rep)); 
+        dFoF_conds(j).cells(k).var=var(dFoF_on(k, indices(j).drift_trial_rep)); 
+        dFoF_conds(j).cells(k).traces=dFoF_on(k, indices(j).drift_trial_rep); 
+        dFoF_conds(j).cells(k).avg_trace=mean(dFoF_during(k, indices(j).drift_trial_rep),2);
+        dFoF_conds(j).cells(k).std_trace=std(abs(dFoF_during(k, indices(j).drift_trial_rep),2));
+    end 
+end
+
+%% drifting stimulus responses, spks 
+
+%use drift_stim_on/off as column index into F_corr file, each row is a ROI,
+%then use iscell for selection
+%of ROIs, do this analysis only if iscell=1 (aka a cell, not a dendrite)
+%snr as mean of std 5-7 frames after stim /mean of std 2-0 frames before stim onset 
+%signal to noise 
+
+%calculate delta F over F 
+celldrift_resp= zeros (length (iscell),160); % 
+
+for i=1:length(iscell)
+    if iscell(i,1)==1
+        for j=1: 160 %deltaF/F
+            Ft=mean(F_corr(i,drift_stim_on(j):drift_stim_on(j)+30));
+            F0=mean(F_corr(i,drift_stim_on(j)-15: drift_stim_on(j)-1)); 
+            celldrift_resp(i,j)= (Ft-F0)/F0;     
+        end
+    end
+end
+
+%celldrift_resp will be n=number of cells x number of stimuli (160) large
+
+
+%initialize empty cell 
+cell_drift_parameters=cell(1,length(iscell));
+drift_params=zeros(2,18); %sf v orientation 
+
+%% optimal delay 
+%frame after stim onset where peak gcamp happens 
+
+
+
+%% snr 
+end

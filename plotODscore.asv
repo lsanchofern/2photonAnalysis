@@ -1,0 +1,28 @@
+function  plotODscore(ODscore)
+%make a distribution of the ODScore 
+
+global SaveDir 
+%bin size
+step=.1; 
+
+bins_OD=min(ODscore):step:max(ODscore); 
+dist_OD=hist(ODscore,bins_OD); %get the distribution
+ndist_OD= dist_OD/ sum(dist_OD); %normalize to 0 -1 
+cdist_OD=cumsum(ndist_OD); %cumulative distribution 
+
+
+%plot distribution  
+fOD=figure('Visible','on'); 
+plot(bins_OD, cdist_OD, 'LineWidth',1.5, 'Color', 'black');
+ylim ([0 1])
+xlim ([-1 1])
+title ('ODI')
+ylabel('cumulative probability', 'FontSize',10)
+xlabel ('OD score', 'FontSize',12)
+set(gca, 'TickLength', [.01 .05],'TickDir', 'out')
+box off 
+
+%plot histogram 
+histogram()
+
+end

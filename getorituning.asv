@@ -1,0 +1,29 @@
+function [pref_ori,cv] = getorituning(oris,resp_oris)
+%INPUTS:
+%oris: array containing unique oris (e.g. from 0 to 360)
+%resp_oris: matrix containing avg cell responses to each condition. Each
+%row is a different orientation and each column is a different cell 
+%OUTPUTS: 
+%Preferred orientation: pref_ori
+%Circular variance, measure of orientation selectivity: cv 
+
+numCellsresp=size(resp_oris);
+pref_ori= zeros (1, numCellsresp(2)); %estimated best orientation for each cell 
+cv=zeros(1,numCellsresp(2)); %circular variance for each cell, measure of orientation selectivity, 0 to 1 
+oris_rad=deg2rad(oris); 
+
+
+for j=1:numCellsresp(2) % do for each cell 
+    resp_ori= resp_oris(:,j); 
+    %for drifting gratings 
+    pref_ori(j)= rad2deg(angle(sum(resp_ori.*exp(2.*1i*oris*2*pi/180)))/2); %calculate preferred orientation in rad, then convert to degrees
+    if (pref_ori(j))<0
+        pref_ori(j)= pref_ori(j)+180; %correction for direction 
+    end
+     
+    cv(j)=1-abs(rad2deg(angle(sum(resp_ori.*exp(1i*oris*2*pi/180))); %cv, or orientation selectivity 
+    
+end 
+
+
+end

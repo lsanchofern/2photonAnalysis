@@ -1,0 +1,53 @@
+function [dFoF_on,dFoF_off, dFoF_during] = dFoF(stim_frame,F_corr_cells, bsF, ca_delay)
+%get dF/F for different time windows during stimulus presentation 
+%inputs:
+%   stim_frame: indices for stim on/off. structure containing 4 fields: drift_stim_on, drift_stim_off, 
+%                flash_stim_on and flash_stim_off 
+%   F_corr_cells: fluo traces for cells 
+%   bsF: frame number over with to baseline 
+%   ca_delay: delay kinetics of ca indicator in frames
+
+%outputs:
+%   dFoF_cells: df/f for pre_stim, stim, and post_stim 
+
+numCells= size (F_corr_cells,1); %number of cells 
+numTrials=size (stim_frame.stim_on); %number of trials for  stimulus
+
+
+stim_on= stim_frame.stim_on; %indices for drift stim on 
+stim_off= stim_frame.stim_off;
+
+drift_stim_on_int= ceil(max(stim_off(1:160)-stim_on(1:160))); %sometimes have different frame n between stim on/of 
+trial_during_df =zeros(numCells, 160, drift_stim_on_int); %pad matrix 
+
+%%make same as above but for stim off 
+
+
+% for drifting stimulus 
+for i=1: numCells %for each cell 
+    for j=1: 160 %for each drifting trial 
+        trial_bs(i,j)= mean(F_corr_cells(i, stim_on (j)-15: stim_on(j)-(15-1))); %trial_bs is F0 for each cell and right before each trial 
+        if stim_off(j)>stim_on(j) %if stim_on index before stim_off index, no errors in TTL logging 
+            trial_df(i,j)= mean(F_corr_cells(i, stim_on(j)+ca_delay:stim_off(j))); %peak after the stimulus  
+
+            trial_during_df(i,j , :)= F_corr_cells(i, stim_on(j)+ drift_stim_on_int); % during the stimulus 
+
+            trial_off_df(i,j)=mean (F_corr_cells(stim_off(j): stim_on(j+1)-1)); %when stim is off 
+
+           
+            trial_during_off_df(i,j , :)= F_corr_cells(i, stim_on(j)+ drift_stim_on_int); % during the stimulus  
+      %  else %if there were errors in TTL logging, skip first in stim_off 
+       %     trial_df(i,j)= mean(F_corr_cells(i, stim_on(j)+ca_delay: stim_off(j+1)));  %during the stimulus
+      %      trial_during_df(j,:,i)= F_corr_cells(i, stim_on(j): stim_off(j+1)); % skip first stim off during the stimulus 
+       %     trial_off_df(i,j)=mean (F_corr_cells(stim_off(j+1)-1: stim_on(j+1)-1)); %when stim is off 
+        end 
+    end 
+end 
+
+trial_bs_repmat= repmat(trial_bs, 1,1 drift_stim_on_int); 
+
+dFoF_on= (trial_df-trial_bs)./(trial_bs); %(F-F0)/F0 for when stimulus is on 
+dFoF_during= (trial_during_df- trial_bs_repmat)./(trial_bs_repmat); 
+dFoF_off= (trial_off_df-trial_bs)./(trial_bs); %(F-F0)/F0 for when stimulus is off, really should ignore this for flashing stimuli  
+
+end
